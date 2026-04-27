@@ -1,0 +1,5 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+flame_vps_state.sqlite3*
