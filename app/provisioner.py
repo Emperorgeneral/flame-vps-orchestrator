@@ -137,7 +137,7 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
         pass
 
     exe = _terminal_exe(install_dir, t.platform)
-    args = [
+    mt_args = [
         exe,
         "/portable",
         f"/login:{login}",
@@ -145,23 +145,39 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
         f"/password:{password}",
     ]
 
-    if os.name != "nt":
-        _LOGGER.warning("non-Windows host — skipping terminal.exe launch (terminal=%s)", terminal_id)
-        return ProvisionResult(True, "broker_login simulated (non-Windows)")
-
-    try:
-        creationflags = 0
+    if os.name == "nt":
+        # Windows: launch directly with detached process flags.
         try:
             creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         except Exception:
             creationflags = 0
+        launch_args = mt_args
+        launch_env = None
+        launch_flags = creationflags
+    else:
+        # Linux / macOS: run under Wine. Each terminal gets its own WINEPREFIX
+        # so Wine registries / settings don't bleed between terminals.
+        wine_bin = shutil.which("wine")
+        if not wine_bin:
+            return ProvisionResult(False, "Wine is not installed on this host. Run: sudo apt install wine64")
+        wineprefix = os.path.join(install_dir, ".wine")
+        os.makedirs(wineprefix, exist_ok=True)
+        launch_args = [wine_bin] + mt_args
+        launch_env = os.environ.copy()
+        launch_env["WINEPREFIX"] = wineprefix
+        launch_env["WINEDEBUG"] = "-all"   # suppress Wine debug spam from stdout
+        launch_env["WINEARCH"] = "win64"
+        launch_flags = 0
+
+    try:
         popen = subprocess.Popen(  # nosec B603 — args list, no shell
-            args,
+            launch_args,
             cwd=install_dir,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
+            env=launch_env,
+            creationflags=launch_flags,
             close_fds=True,
         )
     except Exception as exc:
