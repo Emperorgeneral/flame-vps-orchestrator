@@ -162,14 +162,30 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
             return ProvisionResult(False, "Wine is not installed on this host. Run: sudo apt install wine64")
         wineprefix = os.path.join(install_dir, ".wine")
         os.makedirs(wineprefix, exist_ok=True)
-        launch_args = [wine_bin] + mt_args
         launch_env = os.environ.copy()
         launch_env["WINEPREFIX"] = wineprefix
         launch_env["WINEDEBUG"] = "-all"   # suppress Wine debug spam from stdout
         launch_env["WINEARCH"] = "win64"
         launch_flags = 0
 
+        display = str(launch_env.get("DISPLAY") or "").strip()
+        xvfb_run = shutil.which("xvfb-run")
+        if display:
+            launch_args = [wine_bin] + mt_args
+        elif xvfb_run:
+            # Headless VPS: provide a virtual X server so MT can boot under Wine.
+            launch_args = [
+                xvfb_run,
+                "-a",
+                "-s",
+                "-screen 0 1280x1024x24",
+                wine_bin,
+            ] + mt_args
+        else:
+            return ProvisionResult(False, "Headless host has no DISPLAY and xvfb-run is not installed")
+
     try:
+        _LOGGER.info("launching terminal=%s platform=%s cmd=%s", terminal_id, t.platform, launch_args[:6])
         popen = subprocess.Popen(  # nosec B603 — args list, no shell
             launch_args,
             cwd=install_dir,
