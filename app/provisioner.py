@@ -190,12 +190,16 @@ def _wait_for_login_confirmation(install_dir: str, platform: str, timeout: float
     p = (platform or "").lower()
     if p == "mt5":
         log_bases = [
+            os.path.join(install_dir, "logs"),
             os.path.join(install_dir, "Logs"),
+            os.path.join(install_dir, "MQL5", "logs"),
             os.path.join(install_dir, "MQL5", "Logs"),
         ]
     else:
         log_bases = [
             os.path.join(install_dir, "logs"),
+            os.path.join(install_dir, "Logs"),
+            os.path.join(install_dir, "MQL4", "logs"),
             os.path.join(install_dir, "MQL4", "Logs"),
         ]
 
