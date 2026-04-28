@@ -142,6 +142,31 @@ def _wait_for_login_confirmation(install_dir: str, platform: str, timeout: float
     if not log_path:
         return ProvisionResult(False, "MT log file did not appear — terminal may have crashed on startup")
 
+    success_markers = (
+        "authorized on",
+        "authorization success",
+        "login succeed",
+        "login success",
+    )
+    hard_fail_markers = (
+        "authorization failed",
+        "login failed",
+        "invalid account",
+        "invalid password",
+        "account disabled",
+        "account blocked",
+        "trade disabled",
+        "old version",
+    )
+    transient_markers = (
+        "no connection",
+        "common error",
+        "timeout",
+        "reconnect",
+        "network",
+    )
+    last_login_hint = ""
+
     # Phase 2 – follow the log, scanning for auth-result lines.
     while time.monotonic() < deadline:
         try:
@@ -153,14 +178,22 @@ def _wait_for_login_confirmation(install_dir: str, platform: str, timeout: float
                         break
                     seen_pos = fh.tell()
                     low = line.lower()
-                    if "authorized on" in low or "login succeed" in low or "login success" in low:
+                    if any(m in low for m in success_markers):
                         return ProvisionResult(True, line.strip()[:200])
-                    if "login" in low and ("failed" in low or "invalid" in low or "error" in low or "no connection" in low):
+                    if "login" in low or "authoriz" in low:
+                        last_login_hint = line.strip()[:200]
+                    # Ignore transient connectivity lines; these can appear
+                    # during startup even with valid credentials.
+                    if any(m in low for m in transient_markers):
+                        continue
+                    if any(m in low for m in hard_fail_markers):
                         return ProvisionResult(False, line.strip()[:200])
         except OSError:
             pass
         time.sleep(0.5)
 
+    if last_login_hint:
+        return ProvisionResult(False, f"broker login timed out (last signal: {last_login_hint})")
     return ProvisionResult(False, "broker login timed out — MT did not confirm authorization within the expected window")
 
 
