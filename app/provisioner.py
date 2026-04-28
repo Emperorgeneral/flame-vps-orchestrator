@@ -79,18 +79,18 @@ def _copy_template_tree(src: str, dst: str) -> None:
         # Re-provision: wipe and recopy. Sealed creds live in the orchestrator
         # state DB, not on disk, so we can safely nuke this tree.
         shutil.rmtree(dst, ignore_errors=True)
-    # Ignore Wine-internal paths that must NOT be shared between terminals:
-    #   dosdevices/ – Wine's drive map; z: -> / causes the copytree to traverse
-    #                 the entire host filesystem on Linux if followed.
-    #   wineserver  – Wine IPC socket; terminal-specific.
-    #   *.reg       – Wine registry; gets regenerated per WINEPREFIX.
-    _ignore = shutil.ignore_patterns(
-        "dosdevices", "wineserver", ".update-timestamp",
-        "*.reg", "*.lock", "*.lck",
-    )
-    # symlinks=True: copy symlinks as symlinks instead of following them.
-    # This is safe here because we exclude dosdevices above, and the MT install
-    # tree itself does not contain symlinks that need to be resolved.
+    # symlinks=True — copy symlinks as-is (do NOT follow them).  Wine's
+    # dosdevices/z: points to "/" and following it would traverse the entire
+    # host filesystem.  With symlinks=True the symlink is reproduced verbatim.
+    #
+    # Skip only runtime artifacts that must never be shared across terminals:
+    #   wineserver       — Unix socket for the Wine server; terminal-specific.
+    #   .update-timestamp — stale update marker.
+    #   *.lock / *.lck   — file-level locks.
+    #
+    # NOTE: keep *.reg (Wine registry) — stripping it forces Wine to
+    # re-initialise the entire prefix from scratch on every login (adds 5+ min).
+    _ignore = shutil.ignore_patterns("wineserver", ".update-timestamp", "*.lock", "*.lck")
     shutil.copytree(src, dst, symlinks=True, ignore=_ignore, ignore_dangling_symlinks=True)
 
 
@@ -242,21 +242,21 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
         launch_env["WINEARCH"] = "win64"
         launch_flags = 0
 
-        display = str(launch_env.get("DISPLAY") or "").strip()
         xvfb_run = shutil.which("xvfb-run")
-        if display:
-            launch_args = [wine_bin] + mt_args
-        elif xvfb_run:
-            # Headless VPS: provide a virtual X server so MT can boot under Wine.
+        if xvfb_run:
+            # Prefer xvfb-run on any Linux host — even when DISPLAY is set in the
+            # environment, VPS hosts almost never have a real X server on that
+            # socket, and Wine will hang trying to connect.  xvfb-run -a picks a
+            # free virtual display so multiple terminals run in isolation.
+            launch_env.pop("DISPLAY", None)   # prevent Wine from using a stale DISPLAY
             launch_args = [
-                xvfb_run,
-                "-a",
-                "-s",
-                "-screen 0 1280x1024x24",
-                wine_bin,
+                xvfb_run, "-a", "-s", "-screen 0 1280x1024x24", wine_bin,
             ] + mt_args
+        elif str(launch_env.get("DISPLAY") or "").strip():
+            # xvfb-run not installed but there is a real display — use it.
+            launch_args = [wine_bin] + mt_args
         else:
-            return ProvisionResult(False, "Headless host has no DISPLAY and xvfb-run is not installed")
+            return ProvisionResult(False, "Headless host: xvfb-run not installed (apt install xvfb) and no DISPLAY set")
 
     try:
         _LOGGER.info("launching terminal=%s platform=%s cmd=%s", terminal_id, t.platform, launch_args[:6])
@@ -288,7 +288,9 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
     # Wait for the terminal to write a real authorization (or failure) line.
     # This prevents marking broker_logged_in when wrong credentials are supplied.
     _LOGGER.info("waiting for broker login confirmation terminal=%s", terminal_id)
-    result = _wait_for_login_confirmation(install_dir, t.platform, timeout=90.0)
+    # Allow up to 300 s — Wine WINEPREFIX initialisation alone can take 3-5 min
+    # on a cold VPS before MT5 even starts connecting to the broker.
+    result = _wait_for_login_confirmation(install_dir, t.platform, timeout=300.0)
     if not result.ok:
         process_manager.stop(terminal_id)
         _LOGGER.warning("broker login failed terminal=%s reason=%s", terminal_id, result.message)
