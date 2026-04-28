@@ -79,7 +79,19 @@ def _copy_template_tree(src: str, dst: str) -> None:
         # Re-provision: wipe and recopy. Sealed creds live in the orchestrator
         # state DB, not on disk, so we can safely nuke this tree.
         shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(src, dst, symlinks=False, ignore_dangling_symlinks=True)
+    # Ignore Wine-internal paths that must NOT be shared between terminals:
+    #   dosdevices/ – Wine's drive map; z: -> / causes the copytree to traverse
+    #                 the entire host filesystem on Linux if followed.
+    #   wineserver  – Wine IPC socket; terminal-specific.
+    #   *.reg       – Wine registry; gets regenerated per WINEPREFIX.
+    _ignore = shutil.ignore_patterns(
+        "dosdevices", "wineserver", ".update-timestamp",
+        "*.reg", "*.lock", "*.lck",
+    )
+    # symlinks=True: copy symlinks as symlinks instead of following them.
+    # This is safe here because we exclude dosdevices above, and the MT install
+    # tree itself does not contain symlinks that need to be resolved.
+    shutil.copytree(src, dst, symlinks=True, ignore=_ignore, ignore_dangling_symlinks=True)
 
 
 def _safe_remove(path: str) -> None:
@@ -88,6 +100,68 @@ def _safe_remove(path: str) -> None:
             os.remove(path)
     except Exception:
         _LOGGER.warning("failed to remove %s", path, exc_info=False)
+
+
+def _wait_for_login_confirmation(install_dir: str, platform: str, timeout: float = 90.0) -> ProvisionResult:
+    """Poll the MT4/MT5 terminal log for a broker login outcome.
+
+    Blocks the calling thread for up to *timeout* seconds, returning as soon as
+    the terminal writes a recognizable authorization (success) or login-failed
+    (failure) line.  Returns a failed ProvisionResult if the log never appears
+    or the timeout is exceeded.
+    """
+    p = (platform or "").lower()
+    if p == "mt5":
+        log_bases = [
+            os.path.join(install_dir, "Logs"),
+            os.path.join(install_dir, "MQL5", "Logs"),
+        ]
+    else:
+        log_bases = [
+            os.path.join(install_dir, "logs"),
+            os.path.join(install_dir, "MQL4", "Logs"),
+        ]
+
+    deadline = time.monotonic() + timeout
+    log_path: Optional[str] = None
+    seen_pos = 0
+
+    # Phase 1 – wait for today's log file to appear (MT writes it on first
+    # successful startup, so this may take a few seconds).
+    today = time.strftime("%Y%m%d")
+    while time.monotonic() < deadline:
+        for base in log_bases:
+            candidate = os.path.join(base, f"{today}.log")
+            if os.path.isfile(candidate):
+                log_path = candidate
+                break
+        if log_path:
+            break
+        time.sleep(0.5)
+
+    if not log_path:
+        return ProvisionResult(False, "MT log file did not appear — terminal may have crashed on startup")
+
+    # Phase 2 – follow the log, scanning for auth-result lines.
+    while time.monotonic() < deadline:
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(seen_pos)
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
+                    seen_pos = fh.tell()
+                    low = line.lower()
+                    if "authorized on" in low or "login succeed" in low or "login success" in low:
+                        return ProvisionResult(True, line.strip()[:200])
+                    if "login" in low and ("failed" in low or "invalid" in low or "error" in low or "no connection" in low):
+                        return ProvisionResult(False, line.strip()[:200])
+        except OSError:
+            pass
+        time.sleep(0.5)
+
+    return ProvisionResult(False, "broker login timed out — MT did not confirm authorization within the expected window")
 
 
 # ---------------------------------------------------------------------------
@@ -206,13 +280,19 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
     except Exception:
         _LOGGER.warning("log-tail failed to start for terminal=%s", terminal_id, exc_info=True)
 
-    # Give MT a moment to boot before reporting success. The log-tail will
-    # surface the actual "authorized on" / "login failed" lines as separate
-    # webhook events the user can see.
-    time.sleep(1.0)
+    # Give MT a moment to crash-exit before we start polling the log.
+    time.sleep(1.5)
     if popen.poll() is not None:
         return ProvisionResult(False, f"terminal exited immediately (code={popen.returncode})")
-    return ProvisionResult(True, "broker login dispatched; check log for confirmation")
+
+    # Wait for the terminal to write a real authorization (or failure) line.
+    # This prevents marking broker_logged_in when wrong credentials are supplied.
+    _LOGGER.info("waiting for broker login confirmation terminal=%s", terminal_id)
+    result = _wait_for_login_confirmation(install_dir, t.platform, timeout=90.0)
+    if not result.ok:
+        process_manager.stop(terminal_id)
+        _LOGGER.warning("broker login failed terminal=%s reason=%s", terminal_id, result.message)
+    return result
 
 
 def _ea_artifact(platform: str, account_type: str) -> Tuple[Optional[str], str]:
