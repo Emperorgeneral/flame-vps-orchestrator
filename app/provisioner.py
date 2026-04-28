@@ -90,7 +90,7 @@ def _copy_template_tree(src: str, dst: str) -> None:
     #
     # NOTE: keep *.reg (Wine registry) — stripping it forces Wine to
     # re-initialise the entire prefix from scratch on every login (adds 5+ min).
-    _ignore = shutil.ignore_patterns("wineserver", ".update-timestamp", "*.lock", "*.lck")
+    _ignore = shutil.ignore_patterns("dosdevices", "wineserver", ".update-timestamp", "*.lock", "*.lck")
     shutil.copytree(src, dst, symlinks=True, ignore=_ignore, ignore_dangling_symlinks=True)
 
 
@@ -229,15 +229,17 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
         launch_env = None
         launch_flags = creationflags
     else:
-        # Linux / macOS: run under Wine. Each terminal gets its own WINEPREFIX
-        # so Wine registries / settings don't bleed between terminals.
+        # Linux / macOS: run under Wine.
+        # Use a shared service-level WINEPREFIX so we do not pay Wine's heavy
+        # prefix initialization cost per terminal/login attempt.
         wine_bin = shutil.which("wine")
         if not wine_bin:
             return ProvisionResult(False, "Wine is not installed on this host. Run: sudo apt install wine64")
-        wineprefix = os.path.join(install_dir, ".wine")
-        os.makedirs(wineprefix, exist_ok=True)
         launch_env = os.environ.copy()
-        launch_env["WINEPREFIX"] = wineprefix
+        wineprefix = str(os.environ.get("FLAME_VPS_WINEPREFIX", "/opt/flame/.wine") or "").strip()
+        if wineprefix:
+            os.makedirs(wineprefix, exist_ok=True)
+            launch_env["WINEPREFIX"] = wineprefix
         launch_env["WINEDEBUG"] = "-all"   # suppress Wine debug spam from stdout
         launch_env["WINEARCH"] = "win64"
         launch_flags = 0
