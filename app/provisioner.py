@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -126,6 +127,56 @@ def _safe_remove(path: str) -> None:
             os.remove(path)
     except Exception:
         _LOGGER.warning("failed to remove %s", path, exc_info=False)
+
+
+def _sanitize_launch_text(raw: str) -> str:
+    text = str(raw or "")
+    # Avoid leaking broker secrets in diagnostics.
+    text = re.sub(r"/password:[^\s\]\)\'\"]+", "/password:***", text, flags=re.IGNORECASE)
+    text = re.sub(r"/login:[^\s\]\)\'\"]+", "/login:***", text, flags=re.IGNORECASE)
+    return text
+
+
+def _diagnose_immediate_exit(
+    *,
+    launch_args: list[str],
+    install_dir: str,
+    launch_env: Optional[dict],
+    launch_flags: int,
+) -> str:
+    """Best-effort one-shot diagnostic for immediate launcher exits.
+
+    Runs the same command briefly with captured stdout/stderr so we can return
+    a concrete reason (e.g., missing DLL, bad loader) instead of only code=1.
+    """
+    try:
+        env = (launch_env or os.environ.copy()).copy()
+        if str(env.get("WINEDEBUG") or "").strip() == "-all":
+            env["WINEDEBUG"] = "fixme-all"
+        proc = subprocess.run(  # nosec B603 — args list, no shell
+            launch_args,
+            cwd=install_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            creationflags=launch_flags,
+            close_fds=True,
+            timeout=25,
+            text=True,
+            errors="replace",
+        )
+        stderr = _sanitize_launch_text((proc.stderr or "").strip())
+        stdout = _sanitize_launch_text((proc.stdout or "").strip())
+        sample = stderr or stdout
+        if sample:
+            sample = " | ".join(sample.splitlines()[-3:])
+            return f"diag_exit={proc.returncode}; diag={sample[:400]}"
+        return f"diag_exit={proc.returncode}; diag=no output"
+    except subprocess.TimeoutExpired:
+        return "diag_timeout=25s"
+    except Exception as exc:
+        return f"diag_error={exc}"
 
 
 def _wait_for_login_confirmation(install_dir: str, platform: str, timeout: float = 90.0) -> ProvisionResult:
@@ -344,7 +395,15 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
     # Give MT a moment to crash-exit before we start polling the log.
     time.sleep(1.5)
     if popen.poll() is not None:
-        return ProvisionResult(False, f"terminal exited immediately (code={popen.returncode})")
+        diag = _diagnose_immediate_exit(
+            launch_args=launch_args,
+            install_dir=install_dir,
+            launch_env=launch_env,
+            launch_flags=launch_flags,
+        )
+        msg = f"terminal exited immediately (code={popen.returncode}); {diag}"
+        _LOGGER.warning("terminal immediate exit terminal=%s %s", terminal_id, msg)
+        return ProvisionResult(False, msg)
 
     # Wait for the terminal to write a real authorization (or failure) line.
     # This prevents marking broker_logged_in when wrong credentials are supplied.
