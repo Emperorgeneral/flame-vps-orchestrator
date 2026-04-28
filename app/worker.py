@@ -53,6 +53,9 @@ def _handle_job(job: dict) -> None:
         return
 
     try:
+        job_ok = True
+        job_error = ""
+
         if kind == "provision":
             _transition(terminal_id, status="provisioning", event_type="provisioning_started", message="MT terminal provisioning")
             res = provisioner.provision_terminal(
@@ -63,6 +66,8 @@ def _handle_job(job: dict) -> None:
             if res.ok:
                 _transition(terminal_id, status="ready", event_type="terminal_ready", message=res.message)
             else:
+                job_ok = False
+                job_error = res.message
                 _transition(terminal_id, status="failed", event_type="provision_failed", message=res.message, severity="error")
 
         elif kind == "broker_login":
@@ -72,6 +77,8 @@ def _handle_job(job: dict) -> None:
             if res.ok:
                 _transition(terminal_id, status="broker_logged_in", event_type="broker_logged_in", message=res.message)
             else:
+                job_ok = False
+                job_error = res.message
                 _transition(terminal_id, status="failed", event_type="broker_login_failed", message=res.message, severity="error")
 
         elif kind == "attach_ea":
@@ -85,14 +92,22 @@ def _handle_job(job: dict) -> None:
             if res.ok:
                 _transition(terminal_id, status="live", event_type="ea_attached", message=res.message, ea_attached=True)
             else:
+                job_ok = False
+                job_error = res.message
                 _transition(terminal_id, status="failed", event_type="ea_attach_failed", message=res.message, severity="error")
 
         elif kind == "detach_ea":
             res = provisioner.detach_ea(terminal_id=terminal_id)
+            if not res.ok:
+                job_ok = False
+                job_error = res.message
             _transition(terminal_id, status="broker_logged_in", event_type="ea_detached", message=res.message, ea_attached=False)
 
         elif kind == "restart":
             res = provisioner.restart_terminal(terminal_id=terminal_id)
+            if not res.ok:
+                job_ok = False
+                job_error = res.message
             _transition(terminal_id, status="ready" if res.ok else "failed",
                         event_type="terminal_restarted" if res.ok else "restart_failed",
                         message=res.message,
@@ -100,6 +115,9 @@ def _handle_job(job: dict) -> None:
 
         elif kind == "stop":
             res = provisioner.stop_terminal(terminal_id=terminal_id)
+            if not res.ok:
+                job_ok = False
+                job_error = res.message
             _transition(terminal_id, status="stopped", event_type="terminal_stopped", message=res.message)
 
         elif kind == "destroy":
@@ -112,7 +130,7 @@ def _handle_job(job: dict) -> None:
             state.finish_job(job["id"], ok=False, error=f"unknown kind {kind}")
             return
 
-        state.finish_job(job["id"], ok=True)
+        state.finish_job(job["id"], ok=job_ok, error=job_error)
     except Exception as exc:
         _LOGGER.exception("job %s/%s failed", kind, terminal_id)
         state.record_event(terminal_id=terminal_id, event_type=f"{kind}_exception", severity="error", message=str(exc))
