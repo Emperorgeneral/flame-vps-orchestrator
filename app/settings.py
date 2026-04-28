@@ -41,6 +41,7 @@ class Settings:
     mt4_template_path: str        # source MT4 portable tree to copy from
     mt5_template_path: str        # source MT5 portable tree to copy from
     ea_bundle_root: str           # versioned EA artifacts (.ex4/.ex5/.set/.tpl)
+    wine_bin_path: str            # preferred Wine executable on Linux/macOS
 
     # Worker pool.
     worker_pool_size: int
@@ -70,6 +71,7 @@ def load_settings() -> Settings:
         mt4_template_path=_env("FLAME_VPS_MT4_TEMPLATE", r"C:\flame\templates\mt4"),
         mt5_template_path=_env("FLAME_VPS_MT5_TEMPLATE", r"C:\flame\templates\mt5"),
         ea_bundle_root=_env("FLAME_VPS_EA_BUNDLE_ROOT", r"C:\flame\ea_bundles"),
+        wine_bin_path=_env("FLAME_VPS_WINE_BIN", "/opt/wine-stable/bin/wine"),
 
         worker_pool_size=_env_int("FLAME_VPS_WORKER_POOL", 8, min_value=1, max_value=128),
 

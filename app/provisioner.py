@@ -72,6 +72,21 @@ def _terminal_exe(install_dir: str, platform: str) -> str:
     return os.path.join(install_dir, candidates[0])
 
 
+def _resolve_wine_bin() -> Optional[str]:
+    configured = str(getattr(SETTINGS, "wine_bin_path", "") or "").strip()
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    candidates.extend([
+        "/opt/wine-stable/bin/wine",
+        shutil.which("wine") or "",
+    ])
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _copy_template_tree(src: str, dst: str) -> None:
     if not src or not os.path.isdir(src):
         raise FileNotFoundError(f"template not found: {src}")
@@ -265,9 +280,9 @@ def broker_login(*, terminal_id: str, sealed_payload: bytes) -> ProvisionResult:
         # Linux / macOS: run under Wine.
         # Use a shared service-level WINEPREFIX so we do not pay Wine's heavy
         # prefix initialization cost per terminal/login attempt.
-        wine_bin = shutil.which("wine")
+        wine_bin = _resolve_wine_bin()
         if not wine_bin:
-            return ProvisionResult(False, "Wine is not installed on this host. Run: sudo apt install wine64")
+            return ProvisionResult(False, "Wine executable not found. Set FLAME_VPS_WINE_BIN or install wine64")
         launch_env = os.environ.copy()
         wineprefix = str(os.environ.get("FLAME_VPS_WINEPREFIX", "/opt/flame/.wine") or "").strip()
         if wineprefix:
