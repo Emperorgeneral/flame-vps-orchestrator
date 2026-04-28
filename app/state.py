@@ -202,6 +202,18 @@ def load_sealed_credentials(terminal_id: str) -> Optional[bytes]:
 def enqueue_job(*, terminal_id: str, kind: str, payload: Optional[Dict[str, Any]] = None) -> int:
     now = _now()
     with _cur() as c:
+        existing = c.execute(
+            """
+            SELECT id
+            FROM jobs
+            WHERE terminal_id=? AND kind=? AND status IN ('queued', 'running')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (terminal_id, kind),
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
         cur = c.execute(
             """
             INSERT INTO jobs (terminal_id, kind, payload_json, status, attempts, created_at, updated_at)
