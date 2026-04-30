@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from . import crypto, log_tail, process_manager, state
+from .security import safe_join_under_root, validate_terminal_id
 from .settings import SETTINGS
 
 _LOGGER = logging.getLogger("flame_vps.provisioner")
@@ -53,7 +54,11 @@ class ProvisionResult:
 # ---------------------------------------------------------------------------
 
 def _install_dir(terminal_id: str) -> str:
-    return os.path.join(SETTINGS.mt_install_root, terminal_id)
+    # Defense-in-depth: even though the API layer validates terminal_id, the
+    # worker also calls this from background jobs, so re-validate here and
+    # confine the resulting path to ``mt_install_root``.
+    safe_id = validate_terminal_id(terminal_id)
+    return safe_join_under_root(SETTINGS.mt_install_root, safe_id)
 
 
 def _template_dir(platform: str) -> str:

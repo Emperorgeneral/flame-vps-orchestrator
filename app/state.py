@@ -225,16 +225,39 @@ def enqueue_job(*, terminal_id: str, kind: str, payload: Optional[Dict[str, Any]
 
 
 def claim_next_job() -> Optional[Dict[str, Any]]:
-    with _cur() as c:
-        row = c.execute(
-            "SELECT * FROM jobs WHERE status='queued' ORDER BY id ASC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return None
-        c.execute(
-            "UPDATE jobs SET status='running', attempts=attempts+1, updated_at=? WHERE id=? AND status='queued'",
-            (_now(), int(row["id"])),
-        )
+    # Wrap the SELECT+UPDATE in BEGIN IMMEDIATE so two concurrent workers can
+    # never claim the same job. Without this the read-then-write is a TOCTOU
+    # race: both workers see the row as 'queued' and both bump attempts.
+    init()
+    assert _CONN is not None
+    with _LOCK:
+        cur = _CONN.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            row = cur.execute(
+                "SELECT * FROM jobs WHERE status='queued' ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                cur.execute("COMMIT")
+                return None
+            cur.execute(
+                "UPDATE jobs SET status='running', attempts=attempts+1, updated_at=? WHERE id=? AND status='queued'",
+                (_now(), int(row["id"])),
+            )
+            # rowcount == 0 means another transaction beat us between SELECT
+            # and UPDATE (shouldn't happen with BEGIN IMMEDIATE, but be safe).
+            if int(getattr(cur, "rowcount", 0) or 0) != 1:
+                cur.execute("ROLLBACK")
+                return None
+            cur.execute("COMMIT")
+        except Exception:
+            try:
+                cur.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            cur.close()
     return {
         "id": int(row["id"]),
         "terminal_id": str(row["terminal_id"]),

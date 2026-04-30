@@ -13,7 +13,12 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import crypto, state, worker
-from .security import InvalidSignature, verify_backend_rpc_signature
+from .security import (
+    InvalidSignature,
+    InvalidTerminalId,
+    validate_terminal_id,
+    verify_backend_rpc_signature,
+)
 from .settings import SETTINGS
 
 _LOGGER = logging.getLogger("flame_vps.api")
@@ -62,6 +67,16 @@ def _capacity_guard() -> None:
         raise HTTPException(status_code=503, detail="orchestrator at capacity")
 
 
+def _required_terminal_id(body: Dict[str, Any]) -> str:
+    raw = str(body.get("terminal_id") or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="bad request")
+    try:
+        return validate_terminal_id(raw)
+    except InvalidTerminalId as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 # ---------------------------------------------------------------------------
 # RPC routes
 # ---------------------------------------------------------------------------
@@ -90,11 +105,11 @@ async def terminal_create(
     x_flame_signature: str = Header(default=""),
 ) -> JSONResponse:
     body = await _verified_body(request, x_flame_timestamp, x_flame_nonce, x_flame_signature)
-    terminal_id = str(body.get("terminal_id") or "").strip()
+    terminal_id = _required_terminal_id(body)
     platform = str(body.get("platform") or "").strip().lower()
     account_type = str(body.get("account_type") or "normal").strip().lower()
     owner = str(body.get("owner") or "").strip()
-    if not terminal_id or platform not in {"mt4", "mt5"} or not owner:
+    if platform not in {"mt4", "mt5"} or not owner:
         raise HTTPException(status_code=400, detail="bad request")
     _capacity_guard()
     state.upsert_terminal(terminal_id=terminal_id, owner=owner, platform=platform, account_type=account_type)
@@ -111,9 +126,9 @@ async def terminal_login(
     x_flame_signature: str = Header(default=""),
 ) -> JSONResponse:
     body = await _verified_body(request, x_flame_timestamp, x_flame_nonce, x_flame_signature)
-    terminal_id = str(body.get("terminal_id") or "").strip()
+    terminal_id = _required_terminal_id(body)
     sealed_b64 = str(body.get("sealed_payload_b64") or "").strip()
-    if not terminal_id or not sealed_b64:
+    if not sealed_b64:
         raise HTTPException(status_code=400, detail="bad request")
     try:
         sealed = base64.b64decode(sealed_b64, validate=True)
@@ -132,9 +147,7 @@ async def terminal_attach_ea(
     x_flame_signature: str = Header(default=""),
 ) -> JSONResponse:
     body = await _verified_body(request, x_flame_timestamp, x_flame_nonce, x_flame_signature)
-    terminal_id = str(body.get("terminal_id") or "").strip()
-    if not terminal_id:
-        raise HTTPException(status_code=400, detail="bad request")
+    terminal_id = _required_terminal_id(body)
     state.enqueue_job(terminal_id=terminal_id, kind="attach_ea", payload={
         "account_type": str(body.get("account_type") or "normal"),
         "ea_user_id": str(body.get("ea_user_id") or ""),
@@ -152,9 +165,7 @@ async def terminal_detach_ea(
     x_flame_signature: str = Header(default=""),
 ) -> JSONResponse:
     body = await _verified_body(request, x_flame_timestamp, x_flame_nonce, x_flame_signature)
-    terminal_id = str(body.get("terminal_id") or "").strip()
-    if not terminal_id:
-        raise HTTPException(status_code=400, detail="bad request")
+    terminal_id = _required_terminal_id(body)
     state.enqueue_job(terminal_id=terminal_id, kind="detach_ea")
     return JSONResponse({"status": "OK"})
 
@@ -167,9 +178,7 @@ async def terminal_restart(
     x_flame_signature: str = Header(default=""),
 ) -> JSONResponse:
     body = await _verified_body(request, x_flame_timestamp, x_flame_nonce, x_flame_signature)
-    terminal_id = str(body.get("terminal_id") or "").strip()
-    if not terminal_id:
-        raise HTTPException(status_code=400, detail="bad request")
+    terminal_id = _required_terminal_id(body)
     state.enqueue_job(terminal_id=terminal_id, kind="restart")
     return JSONResponse({"status": "OK"})
 
@@ -182,9 +191,7 @@ async def terminal_stop(
     x_flame_signature: str = Header(default=""),
 ) -> JSONResponse:
     body = await _verified_body(request, x_flame_timestamp, x_flame_nonce, x_flame_signature)
-    terminal_id = str(body.get("terminal_id") or "").strip()
-    if not terminal_id:
-        raise HTTPException(status_code=400, detail="bad request")
+    terminal_id = _required_terminal_id(body)
     state.enqueue_job(terminal_id=terminal_id, kind="stop")
     return JSONResponse({"status": "OK"})
 
@@ -197,8 +204,6 @@ async def terminal_forget(
     x_flame_signature: str = Header(default=""),
 ) -> JSONResponse:
     body = await _verified_body(request, x_flame_timestamp, x_flame_nonce, x_flame_signature)
-    terminal_id = str(body.get("terminal_id") or "").strip()
-    if not terminal_id:
-        raise HTTPException(status_code=400, detail="bad request")
+    terminal_id = _required_terminal_id(body)
     state.enqueue_job(terminal_id=terminal_id, kind="destroy")
     return JSONResponse({"status": "OK"})

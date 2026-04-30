@@ -4,10 +4,13 @@ Mirrors the verifier in flame-backend/vps_routes.py:_verify_webhook_signature.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import socket
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
@@ -17,10 +20,72 @@ from .settings import SETTINGS
 _LOGGER = logging.getLogger("flame_vps.webhook")
 
 
+def _is_disallowed_ip(ip: str) -> bool:
+    """Return True if ``ip`` resolves into a loopback / private / link-local /
+    multicast / reserved range. We refuse to send signed webhooks there to
+    avoid SSRF against host-local services if ``backend_webhook_url`` is ever
+    misconfigured or attacker-influenced.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except Exception:
+        return True
+    return bool(
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
+
+
+def _validate_webhook_url(url: str) -> Optional[str]:
+    """Return error message if ``url`` is unsafe, None if it is OK to call.
+
+    Allows http(s) only, on standard ports, with a hostname that resolves
+    exclusively to public IP addresses. Set
+    ``FLAME_VPS_WEBHOOK_ALLOW_PRIVATE=1`` to bypass the IP allow-list (useful
+    for tests against a local backend).
+    """
+    if not url:
+        return "no url"
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return "invalid url"
+    if parsed.scheme not in {"http", "https"}:
+        return "scheme must be http(s)"
+    host = (parsed.hostname or "").strip()
+    if not host:
+        return "missing host"
+    # Allow operator opt-out for local dev / loopback testing.
+    import os as _os
+    if str(_os.environ.get("FLAME_VPS_WEBHOOK_ALLOW_PRIVATE", "") or "").strip() in {"1", "true", "yes", "on"}:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except Exception:
+        return "dns lookup failed"
+    if not infos:
+        return "dns lookup empty"
+    for info in infos:
+        try:
+            ip = info[4][0]
+        except Exception:
+            continue
+        if _is_disallowed_ip(ip):
+            return f"host resolves to disallowed address {ip}"
+    return None
+
+
 def _post(raw_body: bytes) -> tuple[bool, Optional[str]]:
     url = SETTINGS.backend_webhook_url
     if not url:
         return True, None  # webhook disabled in dev — no-op success
+    err = _validate_webhook_url(url)
+    if err is not None:
+        return False, f"webhook url rejected: {err}"
     sig = sign_webhook_payload(raw_body)
     if not sig:
         return False, "webhook secret not configured"
